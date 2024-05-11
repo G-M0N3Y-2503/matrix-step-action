@@ -1,4 +1,6 @@
 lib/
 dist/
+pkg/
+target/
 node_modules/
 coverage/

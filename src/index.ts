@@ -1,7 +1,3 @@
-/**
- * The entrypoint for the action.
- */
-import { run } from './main'
+import { add } from '../pkg'
 
-// eslint-disable-next-line @typescript-eslint/no-floating-promises
-run()
+console.log(add(2, 2) === 4)
