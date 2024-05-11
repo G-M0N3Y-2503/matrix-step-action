@@ -1,24 +1,15 @@
-name: 'The name of your action here'
-description: 'Provide a description here'
-author: 'Your name or organization here'
-
-# Add your action's branding here. This will appear on the GitHub Marketplace.
+name: 'matrix-step-action'
+description: 'Generate workflow steps with a matrix of inputs'
+author: 'Gerard Ryan'
 branding:
-  icon: 'heart'
-  color: 'red'
-
-# Define your inputs here.
+  icon: 'list'
+  color: 'gray-dark'
 inputs:
-  milliseconds:
-    description: 'Your input description here'
-    required: true
-    default: '1000'
-
-# Define your outputs here.
+  matrix:
+    description: 'List of variables and their possible values'
 outputs:
   time:
     description: 'Your output description here'
-
 runs:
   using: node20
-  main: dist/index.js
+  main: dist/main.js
