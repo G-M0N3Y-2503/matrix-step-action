@@ -1,0 +1,14 @@
+{
+  "name": "matrix-step-action",
+  "version": "0.1.0",
+  "files": [
+    "matrix_step_action_bg.wasm",
+    "matrix_step_action.js",
+    "matrix_step_action.d.ts"
+  ],
+  "module": "matrix_step_action.js",
+  "types": "matrix_step_action.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
