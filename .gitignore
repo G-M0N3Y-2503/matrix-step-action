@@ -99,5 +99,7 @@ __tests__/runner/*
 
 # IDE files
 .idea
-.vscode
 *.code-workspace
+
+# Added by cargo
+/target
