@@ -1,5 +1,7 @@
 use wasm_bindgen::prelude::*;
 
+pub mod actions_toolkit;
+
 #[wasm_bindgen]
 pub fn add(left: usize, right: usize) -> usize {
     left + right
