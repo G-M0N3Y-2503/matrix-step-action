@@ -7,6 +7,8 @@ pub fn add(left: usize, right: usize) -> usize {
     left + right
 }
 
+pub fn main() {}
+
 #[cfg(test)]
 mod tests {
     use {super::*, wasm_bindgen_test::wasm_bindgen_test};
