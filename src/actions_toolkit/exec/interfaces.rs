@@ -31,27 +31,27 @@ extern "C" {
 #[wasm_bindgen]
 pub struct ExecOptions {
     ///  optional working directory.  defaults to current
-    cwd: Option<String>,
+    pub cwd: Option<String>,
     ///  optional envvar dictionary.  defaults to current process's env
-    env: Option<Environment>,
+    pub env: Option<Environment>,
     ///  optional.  defaults to false
-    silent: Option<bool>,
+    pub silent: Option<bool>,
     ///  optional out stream to use. Defaults to process.stdout
-    outStream: Option<Writable>,
+    pub outStream: Option<Writable>,
     ///  optional err stream to use. Defaults to process.stderr
-    errStream: Option<Writable>,
+    pub errStream: Option<Writable>,
     ///  optional. whether to skip quoting/escaping arguments if needed.  defaults to false.
-    windowsVerbatimArguments: Option<bool>,
+    pub windowsVerbatimArguments: Option<bool>,
     ///  optional.  whether to fail if output to stderr.  defaults to false
-    failOnStdErr: Option<bool>,
+    pub failOnStdErr: Option<bool>,
     ///  optional.  defaults to failing on non zero.  ignore will not fail leaving it up to the caller
-    ignoreReturnCode: Option<bool>,
+    pub ignoreReturnCode: Option<bool>,
     ///  optional. How long in ms to wait for STDIO streams to close after the exit event of the process before terminating. defaults to 10000
-    delay: Option<usize>,
+    pub delay: Option<usize>,
     ///  optional. input to write to the process on STDIN.
-    input: Option<Buffer>,
+    pub input: Option<Buffer>,
     ///  optional. Listeners for output. Callback functions that will be called on these events
-    listeners: Option<ExecListeners>,
+    pub listeners: Option<ExecListeners>,
 }
 /**
  * Interface for the output of getExecOutput()
@@ -59,11 +59,11 @@ pub struct ExecOptions {
 #[wasm_bindgen]
 pub struct ExecOutput {
     /// The exit code of the process
-    exitCode: isize,
+    pub exitCode: isize,
     /// The entire stdout of the process as a string
-    stdout: String,
+    pub stdout: String,
     /// The entire stderr of the process as a string
-    stderr: String,
+    pub stderr: String,
 }
 /**
  * The user defined listeners for an exec call
@@ -71,13 +71,13 @@ pub struct ExecOutput {
 #[wasm_bindgen]
 pub struct ExecListeners {
     ///  A call back for each buffer of stdout
-    stdout: Option<&mut dyn FnMut(Buffer)>,
+    pub stdout: Option<&Closure<dyn FnMut(Buffer)>>,
     ///  A call back for each buffer of stderr
-    stderr: Option<&mut dyn FnMut(Buffer)>,
+    pub stderr: Option<&Closure<dyn FnMut(Buffer)>>,
     ///  A call back for each line of stdout
-    stdline: Option<&mut dyn FnMut(&str)>,
+    pub stdline: Option<&Closure<dyn FnMut(&str)>>,
     ///  A call back for each line of stderr
-    errline: Option<&mut dyn FnMut(&str)>,
+    pub errline: Option<&Closure<dyn FnMut(&str)>>,
     ///  A call back for each debug log
-    debug: Option<&mut dyn FnMut(&str)>,
+    pub debug: Option<&Closure<dyn FnMut(&str)>>,
 }

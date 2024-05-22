@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use matrix_step_action::actions_toolkit;
+use matrix_step_action::actions_toolkit::{self, exec::ExecOptions};
 use {wasm_bindgen::prelude::*, wasm_bindgen_test::wasm_bindgen_test};
 
 #[wasm_bindgen_test]
@@ -171,4 +171,28 @@ fn test_core_set_failed_bindings() {
     use js_sys::Error;
 
     core::set_failed(Error::new("message"));
+}
+
+#[wasm_bindgen_test]
+async fn test_exec_bindings() {
+    use actions_toolkit::exec;
+
+    exec::exec(
+        "echo",
+        Some(vec!["\"${ENV_VAR}\"".to_owned()]),
+        Some(ExecOptions {
+            cwd: Some(std::env::current_dir().unwrap().display().to_string()),
+            env: todo!(),
+            silent: todo!(),
+            outStream: todo!(),
+            errStream: todo!(),
+            windowsVerbatimArguments: todo!(),
+            failOnStdErr: todo!(),
+            ignoreReturnCode: todo!(),
+            delay: todo!(),
+            input: todo!(),
+            listeners: todo!(),
+        })
+        .await,
+    );
 }
