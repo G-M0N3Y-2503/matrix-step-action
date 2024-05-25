@@ -14,6 +14,7 @@ const config: Configuration = {
     webassemblyModuleFilename: '[id].wasm',
     clean: true,
   },
+  devtool: 'source-map',
 }
 
 export default config

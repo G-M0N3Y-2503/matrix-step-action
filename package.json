@@ -16,12 +16,15 @@
     "lint:ts": "npx eslint . -c ./.github/linters/.eslintrc.yml",
     "lint:rs": "cargo clippy --all-targets",
     "lint": "npm run lint:rs && npm run lint:ts",
-    "build": "wasm-pack build -- --all-targets",
+    "build:prod": "wasm-pack build -- --all-targets",
+    "build:dev": "wasm-pack build --dev -- --all-targets",
     "test": "wasm-pack test --node -- --all-targets",
-    "dist": "npm run format:write && npm run build && npm run package",
+    "dist:prod": "npm run format:write && npm run build:prod && npm run package:prod",
+    "dist:dev": "npm run format:write && npm run build:dev && npm run package",
     "package": "npx webpack",
+    "package:prod": "npx webpack --no-devtool",
     "package:watch": "npm run package -- --watch",
-    "all": "npm run dist && npm run lint && npm run test"
+    "all": "npm run dist:prod && npm run lint && npm run test"
   },
   "license": "MIT",
   "dependencies": {
