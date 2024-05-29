@@ -1,7 +1,7 @@
-import { Configuration } from 'webpack'
+import * as webpack from 'webpack'
 import * as path from 'path'
 
-const config: Configuration = {
+const config: webpack.Configuration = {
   mode: 'production',
   target: 'node',
   experiments: {
@@ -15,6 +15,15 @@ const config: Configuration = {
     clean: true,
   },
   devtool: 'source-map',
+  module: {
+    rules: [
+      {
+        test: /\.js$/,
+        enforce: 'pre',
+        use: 'source-map-loader',
+      },
+    ],
+  },
 }
 
 export default config

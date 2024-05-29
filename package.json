@@ -16,11 +16,13 @@
     "lint:ts": "npx eslint . -c ./.github/linters/.eslintrc.yml",
     "lint:rs": "cargo clippy --all-targets",
     "lint": "npm run lint:rs && npm run lint:ts",
-    "build:prod": "wasm-pack build -- --all-targets",
-    "build:dev": "wasm-pack build --dev -- --all-targets",
+    "build": "wasm-pack build --out-dir ./target/matrix-step-action",
+    "build:dev": "npm run build -- --dev",
+    "build-all": "npm run build -- --all-targets",
+    "build-all:dev": "npm run build:dev -- --all-targets",
     "test": "wasm-pack test --node -- --all-targets",
-    "dist:prod": "npm run format:write && npm run build:prod && npm run package:prod",
-    "dist:dev": "npm run format:write && npm run build:dev && npm run package",
+    "dist:prod": "npm run format:write && npm run build-all:prod && npm run package:prod",
+    "dist:dev": "npm run format:write && npm run build-all:dev && npm run package",
     "package": "npx webpack",
     "package:prod": "npx webpack --no-devtool",
     "package:watch": "npm run package -- --watch",
@@ -29,7 +31,8 @@
   "license": "MIT",
   "dependencies": {
     "@actions/core": "^1.10.1",
-    "@actions/exec": "^1.1.1"
+    "@actions/exec": "^1.1.1",
+    "matrix-step-action": "file:target/matrix-step-action"
   },
   "devDependencies": {
     "@types/node": "^20.12.12",
@@ -41,6 +44,7 @@
     "eslint-plugin-prettier": "^5.1.3",
     "prettier": "^3.2.5",
     "prettier-eslint": "^16.3.0",
+    "source-map-loader": "^5.0.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.4.5",
     "webpack": "^5.91.0",

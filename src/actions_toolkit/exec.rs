@@ -1,12 +1,9 @@
-use {
-    super::*,
-    js_sys::{JsString, Promise},
-};
+use super::*;
 
 pub mod interfaces;
-pub use interfaces::{ExecListeners, ExecOptions, ExecOutput};
+pub use interfaces::{ExecOptions, ExecOutput, FFIExecListeners};
 
-#[wasm_bindgen(module = "@actions/core")]
+#[wasm_bindgen(module = "@actions/exec")]
 extern "C" {
     ///  Exec a command.
     ///  Output will be streamed to the live console.
@@ -30,10 +27,10 @@ extern "C" {
     ///  @param     args                  optional arguments for tool. Escaping is handled by the lib.
     ///  @param     options               optional exec options.  See ExecOptions
     ///  @returns   Promise<ExecOutput>   exit code, stdout, and stderr
-    #[wasm_bindgen(js_name = "getExecOutput")]
-    pub fn get_exec_output(
+    #[wasm_bindgen(catch, js_name = "getExecOutput")]
+    pub async fn get_exec_output(
         commandLine: &str,
         args: Option<Vec<String>>,
         options: Option<ExecOptions>,
-    ) -> Promise;
+    ) -> Result<JsValue, JsValue>;
 }

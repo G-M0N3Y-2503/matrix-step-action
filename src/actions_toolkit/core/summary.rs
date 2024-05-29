@@ -1,6 +1,7 @@
 use super::*;
+
 #[wasm_bindgen]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
 pub struct SummaryTableCell {
     /// Cell content
     #[wasm_bindgen(getter_with_clone)]
@@ -19,6 +20,9 @@ pub struct SummaryTableCell {
 }
 
 #[wasm_bindgen]
+#[derive(
+    Serialize, Deserialize, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default,
+)]
 pub struct SummaryImageOptions {
     /// The width of the image in pixels. Must be an integer without a unit.
     /// (optional)
@@ -30,19 +34,23 @@ pub struct SummaryImageOptions {
     pub height: Option<usize>,
 }
 #[wasm_bindgen]
+#[derive(
+    Serialize, Deserialize, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default,
+)]
 pub struct SummaryWriteOptions {
     /// Replace all existing content in summary file with buffer contents
     /// (optional) default: false
     pub overwrite: Option<bool>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
 pub struct SummaryTable(pub Vec<Vec<SummaryTableCell>>);
 
 #[wasm_bindgen(module = "@actions/core")]
 extern "C" {
     #[allow(clippy::empty_docs)]
     #[wasm_bindgen(no_deref)] // TODO: https://github.com/rustwasm/wasm-bindgen/issues/3964
+    #[derive(Clone, PartialEq, Debug, Default)]
     pub type Summary;
 
     #[allow(clippy::empty_docs)]

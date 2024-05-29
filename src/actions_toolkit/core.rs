@@ -5,6 +5,9 @@ use {
 
 /// Interface for getInput options
 #[wasm_bindgen]
+#[derive(
+    Serialize, Deserialize, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default,
+)]
 pub struct InputOptions {
     /// Optional. Whether the input is required. If required and not present, will throw. Defaults to false
     pub required: Option<bool>,
@@ -14,6 +17,7 @@ pub struct InputOptions {
 }
 /// The code to exit an action*
 #[wasm_bindgen]
+#[derive(Serialize, Deserialize, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
 pub enum ExitCode {
     /// A code indicating that the action was successful
     Success = 0,
@@ -23,6 +27,7 @@ pub enum ExitCode {
 /// Optional properties that can be sent with annotation commands (notice, error, and warning)
 /// See: https://docs.github.com/en/rest/reference/checks#create-a-check-run for more information about annotations.
 #[wasm_bindgen]
+#[derive(Serialize, Deserialize, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Default)]
 pub struct AnnotationProperties {
     /// A title for the annotation.
     #[wasm_bindgen(getter_with_clone)]

@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use matrix_step_action::actions_toolkit::{self, exec::ExecOptions};
+use matrix_step_action::actions_toolkit;
 use {wasm_bindgen::prelude::*, wasm_bindgen_test::wasm_bindgen_test};
 
 #[wasm_bindgen_test]
@@ -175,24 +175,34 @@ fn test_core_set_failed_bindings() {
 
 #[wasm_bindgen_test]
 async fn test_exec_bindings() {
-    use actions_toolkit::exec;
+    use actions_toolkit::exec::{self, ExecOptions, FFIExecListeners};
+    use js_sys::Map;
 
-    exec::exec(
+    let env = Map::new();
+    env.set(&JsValue::from("ENV_VAR"), &JsValue::from("Value"));
+    let tmp = exec::exec(
         "echo",
         Some(vec!["\"${ENV_VAR}\"".to_owned()]),
         Some(ExecOptions {
-            cwd: Some(std::env::current_dir().unwrap().display().to_string()),
-            env: todo!(),
-            silent: todo!(),
-            outStream: todo!(),
-            errStream: todo!(),
-            windowsVerbatimArguments: todo!(),
-            failOnStdErr: todo!(),
-            ignoreReturnCode: todo!(),
-            delay: todo!(),
-            input: todo!(),
-            listeners: todo!(),
-        })
-        .await,
+            cwd: Some(env!("CARGO_TARGET_TMPDIR").to_string()),
+            env: Some(env),
+            silent: Some(false),
+            outStream: None,
+            errStream: None,
+            windowsVerbatimArguments: Some(false),
+            failOnStdErr: Some(true),
+            ignoreReturnCode: Some(false),
+            delay: Some(10000),
+            input: None,
+            listeners: Some(FFIExecListeners {
+                stdout: JsValue::undefined(),
+                stderr: JsValue::undefined(),
+                stdline: JsValue::undefined(),
+                errline: JsValue::undefined(),
+                debug: JsValue::undefined(),
+            }),
+        }),
     );
+    println!("test!");
+    assert_eq!(tmp.await.unwrap().as_f64(), Some(0f64));
 }

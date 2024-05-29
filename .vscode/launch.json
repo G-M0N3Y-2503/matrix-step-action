@@ -11,7 +11,13 @@
       "skipFiles": ["<node_internals>/**"],
       "type": "node",
       "preLaunchTask": "npm: dist:dev",
-      "remoteRoot": "${workspaceFolder}"
+      "remoteRoot": "${workspaceFolder}",
+      "sourceMapPathOverrides": {
+        "webpack:///../actions-toolkit/packages/*": "${workspaceFolder}/node_modules/@actions/*",
+        "meteor://💻app/*": "${workspaceFolder}/*",
+        "webpack:///./~/*": "${workspaceFolder}/node_modules/*",
+        "webpack://?:*/*": "${workspaceFolder}/*"
+      }
     }
   ]
 }
