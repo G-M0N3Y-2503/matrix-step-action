@@ -1,5 +1,10 @@
 use wasm_bindgen::prelude::*;
 
+mod matrix;
+pub use matrix::EnvVars;
+
+mod input;
+
 #[macro_export]
 macro_rules! prop_builder {
     ($obj:block$(.$setter:ident($value:expr))*) => {{
@@ -9,25 +14,40 @@ macro_rules! prop_builder {
     }};
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(module = "node:process")]
 extern "C" {
-    #[wasm_bindgen(js_namespace = console)]
-    fn log(s: &str);
+    pub type Env;
+    #[wasm_bindgen(js_name = "env")]
+    pub static ENV: Env;
+
+    #[wasm_bindgen(method, structural, indexing_getter)]
+    pub fn get(this: &Env, variable: &str) -> js_sys::JsString;
+
+    #[wasm_bindgen(method, structural, indexing_setter)]
+    pub fn set(this: &Env, variable: &str, value: &str);
+
+    #[wasm_bindgen(method, structural, indexing_deleter)]
+    pub fn delete(this: &Env, variable: &str);
 }
 
 #[wasm_bindgen()]
 pub async fn run() {
-    use actions::exec::{self, Env, ExecListeners, ExecOptions, ExecOutput};
+    use actions::{
+        core::{debug, error, info},
+        exec::{self, Env, ExecListeners, ExecOptions, ExecOutput},
+    };
 
     let print_stdout = Closure::new(|str: js_sys::JsString| {
-        log(&format!("{str:?}"));
+        info(&format!("{str:?}"));
     });
     let print_stderr = Closure::new(|str: js_sys::JsString| {
-        log(&format!("Error: {str:?}"));
+        error(format!("Error: {str:?}").into(), None);
     });
     let print_debug = Closure::new(|str: js_sys::JsString| {
-        log(&format!("Debug: {str:?}"));
+        debug(&format!("Debug: {str:?}"));
     });
+
+    ENV.set("test", "value");
 
     let env = Env::default();
     env.set("ENV_VAR", "Value");
@@ -75,6 +95,7 @@ pub async fn run() {
 mod tests {
     use {super::*, wasm_bindgen_test::wasm_bindgen_test};
 
+    #[ignore = "Runs main without dependencies"]
     #[wasm_bindgen_test]
     async fn can_run() {
         run().await;
