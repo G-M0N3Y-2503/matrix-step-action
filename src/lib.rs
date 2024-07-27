@@ -1,7 +1,7 @@
 use wasm_bindgen::prelude::*;
 
-mod matrix;
-pub use matrix::EnvVars;
+mod env_matrix;
+pub use env_matrix::EnvMatrix;
 
 mod input;
 

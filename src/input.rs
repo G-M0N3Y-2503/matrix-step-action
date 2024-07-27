@@ -2,7 +2,7 @@ use {super::*, actions::core::InputOptions};
 
 const ENV_VARS_INPUT_KEY: &str = "ENV_VARS";
 
-pub async fn parse_input() -> Result<EnvVars, js_sys::Error> {
+pub async fn parse_input() -> Result<EnvMatrix, js_sys::Error> {
     match actions::core::get_input(
         ENV_VARS_INPUT_KEY,
         Some(prop_builder!(
@@ -44,15 +44,16 @@ mod tests {
         .unwrap();
     }
 
+    #[test]
     #[wasm_bindgen_test]
-    async fn test_input_parse() {
+    fn test_input_parse() {
         console_log!(
             "{}",
-            serde_json::to_string(&EnvVars::from_iter([(
+            serde_json::to_string(&EnvMatrix::from_iter([(
                 "VAR1".to_owned(),
-                matrix::ValuesFrom::Combinations {
+                env_matrix::ValuesFrom::Combinations {
                     of: 2,
-                    from: Box::new(matrix::ValuesFrom::Values(vec![
+                    from: Box::new(env_matrix::ValuesFrom::Values(vec![
                         "1".to_owned(),
                         "2".to_owned(),
                         "3".to_owned(),
