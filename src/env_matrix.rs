@@ -7,6 +7,7 @@ use {
 };
 
 #[cfg(test)]
+#[collapse_debuginfo(yes)]
 macro_rules! to_string {
     ($string:expr) => {
         $string.to_string()
@@ -65,30 +66,33 @@ impl FromIterator<(String, ValuesFrom)> for EnvMatrix {
     }
 }
 
-impl IntoIterator for EnvMatrix {
-    type Item = HashMap<String, String>;
-    type IntoIter = IntoIter;
+// impl IntoIterator for EnvMatrix {
+//     type Item = HashMap<String, String>;
+//     type IntoIter = IntoIter;
 
-    fn into_iter(self) -> Self::IntoIter {
-        Self::IntoIter {
-            var_iters: HashMap::from_iter(self.0.into_iter().map(|(k, v)| (k, v.into_iter()))),
-        }
-    }
-}
+//     fn into_iter(self) -> Self::IntoIter {
+//         Self::IntoIter {
+//             var_iters: HashMap::from_iter(self.0.into_iter().map(|(k, v)| (k, v.into_iter()))),
+//         }
+//     }
+// }
 
 pub struct IntoIter {
     var_iters: HashMap<String, Box<dyn Iterator<Item = String>>>,
 }
 
-impl Iterator for IntoIter {
+impl Iterator for EnvMatrix {
     type Item = HashMap<String, String>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        Some(HashMap::from_iter(
-            self.var_iters
-                .iter_mut()
-                .filter_map(|(k, v)| v.next().map(|v| (k.clone(), v))),
-        ))
+        // let env = HashMap::with_capacity(self.0.len());
+
+        // Some(HashMap::from_iter(
+        //     self.var_iters
+        //         .iter_mut()
+        //         .filter_map(|(k, v)| v.next().map(|v| (k.clone(), v))),
+        // ))
+        None
     }
 }
 
@@ -109,7 +113,7 @@ impl IntoIterator for ValuesFrom {
                     .map(move |c| c.join(&join_with)),
             ),
             ValuesFrom::Select { from, r#where } => Box::new(
-                from.into_iter(), // .filter(move |value| (filter::CompareContext::from(&r#where))(value)),
+                from.into_iter(), // .filter(|value| r#where.to_closure(value, &HashMap::new())),
             ),
         }
     }

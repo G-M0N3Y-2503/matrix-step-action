@@ -1,3 +1,5 @@
+mod retry_fold;
+
 use {
     super::*,
     core::{
@@ -5,6 +7,7 @@ use {
         ops::{ControlFlow, Not},
     },
     log::*,
+    retry_fold::retry_fold,
     std::collections::HashMap,
 };
 
@@ -22,50 +25,92 @@ impl Display for Filter {
         write!(f, "{}", serde_json::to_string_pretty(self).unwrap())
     }
 }
-impl<'filter> From<&'filter Filter> for CompareContext<'filter> {
-    fn from(filter: &'filter Filter) -> Self {
-        match filter {
-            Filter::All(filters) => Box::new(|value, env| {
-                match filters
-                    .iter()
-                    .map(Self::from)
-                    .try_fold(Err("unused"), |_, compare| match compare(value, env) {
-                        res @ Ok(true) => ControlFlow::Continue(res),
-                        res @ Ok(false) | res @ Err(_) => ControlFlow::Break(res),
-                    }) {
-                    ControlFlow::Continue(res) | ControlFlow::Break(res) => res,
+pub type CompareContext<'comparer> = Box<dyn FnMut() -> Result<bool, &'comparer str> + 'comparer>;
+impl Filter {
+    pub fn to_predicate<'comparer>(
+        &'comparer self,
+        value: &'comparer str,
+        env: &'comparer HashMap<String, String>,
+    ) -> CompareContext<'comparer> {
+        type Result<'comparer> = core::result::Result<bool, &'comparer str>;
+
+        #[inline]
+        fn retry_fold_filters<'c>(
+            filters: impl IntoIterator<Item = &'c Filter> + 'c,
+            init: Result<'c>,
+            fold: impl FnMut(
+                    &mut Result,
+                    CompareContext<'c>,
+                ) -> ControlFlow<(Result<'c>, CompareContext<'c>)>
+                + 'c,
+            value: &'c str,
+            env: &'c HashMap<String, String>,
+        ) -> CompareContext<'c> {
+            let mut filters = itertools::put_back(
+                filters
+                    .into_iter()
+                    .map(|filter| filter.to_predicate(value, env)),
+            );
+            let mut retry_fold = retry_fold(init, fold);
+            Box::new(move || match retry_fold(&mut filters) {
+                ControlFlow::Continue(res) | ControlFlow::Break(res) => res,
+            })
+        }
+
+        #[inline]
+        fn try_all<'c>(
+            _initial: &mut Result,
+            mut comparer: CompareContext<'c>,
+        ) -> ControlFlow<(Result<'c>, CompareContext<'c>)> {
+            const CONTINUE_VALUE: Result = Ok(true);
+            debug_assert_eq!(*_initial, CONTINUE_VALUE);
+            match comparer() {
+                CONTINUE_VALUE => ControlFlow::Continue(()),
+                res @ Ok(false) | res @ Err(_) => ControlFlow::Break((res, comparer)),
+            }
+        }
+
+        #[inline]
+        fn try_any<'c>(
+            _initial: &mut Result,
+            mut comparer: CompareContext<'c>,
+        ) -> ControlFlow<(Result<'c>, CompareContext<'c>)> {
+            const CONTINUE_VALUE: Result = Ok(false);
+            debug_assert_eq!(*_initial, CONTINUE_VALUE);
+            match comparer() {
+                CONTINUE_VALUE => ControlFlow::Continue(()),
+                res @ Ok(true) | res @ Err(_) => ControlFlow::Break((res, comparer)),
+            }
+        }
+
+        match self {
+            Filter::All(filters) => retry_fold_filters(filters, Ok(true), try_all, value, env),
+            Filter::Any(filters) => retry_fold_filters(filters, Ok(false), try_any, value, env),
+            parrent_filter @ Filter::Not(filter) => {
+                let filter = filter.as_ref();
+                if let Filter::Not(_) = filter {
+                    warn!("Double negative filter found at:\n{parrent_filter}");
                 }
-            }),
-            Filter::Any(filters) => Box::new(|value, env| {
-                match filters
-                    .iter()
-                    .map(Self::from)
-                    .try_fold(Err("unused"), |_, compare| match compare(value, env) {
-                        res @ Ok(false) => ControlFlow::Continue(res),
-                        res @ Ok(true) | res @ Err(_) => ControlFlow::Break(res),
-                    }) {
-                    ControlFlow::Continue(res) | ControlFlow::Break(res) => res,
-                }
-            }),
-            parrent_filter @ Filter::Not(filter) => Box::new(move |value, env| {
-                match filter.as_ref() {
-                    // match Filter::Context to avoid wrapping in an unnecessary boxed closure
-                    Filter::Context(context) => match ContextComparer::from(context) {
-                        ContextComparer::Env(compare) => compare(env),
-                        ContextComparer::Value(compare) => Ok(compare(value)),
+                let mut compare = filter.to_predicate(value, env);
+                Box::new(move || compare().map(Not::not))
+            }
+            Filter::Context(FilterContext::Value(comparer)) => {
+                let comparer = CompareValue::from(comparer);
+                Box::new(move || Ok(comparer(value)))
+            }
+            Filter::Context(FilterContext::Env(comparers)) => {
+                let mut comparers = itertools::put_back(comparers.iter().map(
+                    move |(env_var, comparer): &(String, _)| -> CompareContext {
+                        let comparer = CompareValue::from(comparer);
+                        Box::new(move || match env.get(env_var) {
+                            Some(value) => Ok(comparer(value)),
+                            None => Err(env_var.as_str()),
+                        })
                     },
-                    filter @ Filter::Not(_) => {
-                        warn!("Double negative found at:\n{parrent_filter}");
-                        (Self::from(filter))(value, env)
-                    }
-                    filter => (Self::from(filter))(value, env),
-                }
-                .map(Not::not)
-            }),
-            Filter::Context(context) => {
-                Box::new(move |value, env| match ContextComparer::from(context) {
-                    ContextComparer::Env(compare) => compare(env),
-                    ContextComparer::Value(compare) => Ok(compare(value)),
+                ));
+                let mut retry_fold = retry_fold(Ok(true), try_all);
+                Box::new(move || match retry_fold(&mut comparers) {
+                    ControlFlow::Continue(res) | ControlFlow::Break(res) => res,
                 })
             }
         }
@@ -78,11 +123,6 @@ pub enum FilterContext {
     #[serde(with = "filter_context_env_serde")]
     Env(Vec<(String, ValueComparer)>),
     Value(ValueComparer),
-}
-impl Display for FilterContext {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", serde_json::to_string_pretty(self).unwrap())
-    }
 }
 
 mod filter_context_env_serde {
@@ -134,36 +174,9 @@ mod filter_context_env_serde {
     }
 }
 
-pub type CompareContext<'comparer> =
-    Box<dyn Fn(&str, &HashMap<String, String>) -> Result<bool, &'comparer str> + 'comparer>;
-type CompareValue<'comparer> = Box<dyn Fn(&str) -> bool + 'comparer>;
-type CompareEnv<'comparer> =
-    Box<dyn Fn(&HashMap<String, String>) -> Result<bool, &'comparer str> + 'comparer>;
-enum ContextComparer<'comparer> {
-    Env(CompareEnv<'comparer>),
-    Value(CompareValue<'comparer>),
-}
-impl<'comparer> From<&'comparer FilterContext> for ContextComparer<'comparer> {
-    fn from(context: &'comparer FilterContext) -> Self {
-        match context {
-            FilterContext::Value(comparer) => ContextComparer::Value(comparer.into()),
-            FilterContext::Env(comparer) => ContextComparer::Env(Box::new(|env| {
-                match comparer
-                    .iter()
-                    .try_fold(Err("unused"), |_, (env_var, comparer)| {
-                        match env
-                            .get(env_var)
-                            .map(|value| (CompareValue::from(comparer))(value))
-                        {
-                            Some(true) => ControlFlow::Continue(Ok(true)),
-                            Some(false) => ControlFlow::Break(Ok(false)),
-                            None => ControlFlow::Break(Err(env_var.as_str())),
-                        }
-                    }) {
-                    ControlFlow::Continue(res) | ControlFlow::Break(res) => res,
-                }
-            })),
-        }
+impl Display for FilterContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", serde_json::to_string_pretty(self).unwrap())
     }
 }
 
@@ -178,6 +191,7 @@ impl Display for ValueComparer {
         write!(f, "{}", serde_json::to_string_pretty(self).unwrap())
     }
 }
+type CompareValue<'comparer> = Box<dyn Fn(&str) -> bool + 'comparer>;
 impl<'comparer> From<&'comparer ValueComparer> for CompareValue<'comparer> {
     fn from(comparer: &'comparer ValueComparer) -> Self {
         match comparer {
@@ -268,386 +282,358 @@ mod tests {
     }
 
     macro_rules! to_env {
-        [$(($variable:expr, $value:expr)),+] => {
-            HashMap::from_iter([$((to_string!($variable), to_string!($value))),+])
+        [$(($variable:expr, $value:expr)),*] => {
+            HashMap::<String, String, std::hash::RandomState>::from_iter([$((to_string!($variable), to_string!($value))),*])
+        };
+    }
+
+    #[collapse_debuginfo(no)]
+    macro_rules! test_filter_predicate {
+        (
+            filters!{$(let $filter_name:ident = $filter_expr:expr;)+};
+            $(for_each_filter!{
+                predicate_with!($value:expr, $env:expr);
+                $(return_matches!($filter_match:ident, $pattern:pat);)+
+            };)+
+        ) => {
+            $(let $filter_name = $filter_expr;)+
+            let test_reuse = 0..4;
+            for filter in [$(&$filter_name),+] {
+                $(
+                    let env = $env;
+                    let mut predicate = filter.to_predicate($value, &env);
+                    for try_index in test_reuse.clone() {
+                        assert!(match predicate() {
+                           $($pattern if filter == &$filter_match => true,)+
+                            matched => panic!(
+                                "Unexpected `return_matches!({filter_name}, {matched:?})` for `predicate_with!({value}, {env})` on run {try_num}",
+                                filter_name = match filter {
+                                    $(_ if filter == &$filter_match => stringify!($filter_match).to_owned(),)+
+                                    filter => format!("{filter:?}"),
+                                },
+                                value = stringify!($value),
+                                env = stringify!($env),
+                                try_num = try_index + 1,
+                            ),
+                        });
+                    }
+                )+
+            }
         };
     }
 
     #[test]
     #[wasm_bindgen_test]
-    fn compare_context_test() {
-        macro_rules! unwrap_match {
-            ($expression:expr, $pattern:pat $(if $guard:expr)? => $bound:ident $(,)?) => {
-                match $expression {
-                    $pattern $(if $guard)? => $bound,
-                    _ => panic!("Does Not Match")
-                }
+    fn value_filter_test() {
+        test_filter_predicate! {
+            filters!{
+                let value_eq_one = Filter::Context(Value(Equals(to_string!("one"))));
+                let value_ne_one = Filter::Not(Box::new(value_eq_one.clone()));
             };
-        }
+            for_each_filter!{
+                predicate_with!("one", &to_env![("VAR1", "one"), ("VAR2", "two")]);
+                return_matches!(value_eq_one, Ok(true));
+                return_matches!(value_ne_one, Ok(false));
+            };
+            for_each_filter!{
+                predicate_with!("one", &to_env![("VAR3", "irrelevant change")]);
+                return_matches!(value_eq_one, Ok(true));
+                return_matches!(value_ne_one, Ok(false));
+            };
+            for_each_filter!{
+                predicate_with!("two", &to_env![("VAR1", "one"), ("VAR2", "two")]);
+                return_matches!(value_eq_one, Ok(false));
+                return_matches!(value_ne_one, Ok(true));
+            };
+            for_each_filter!{
+                predicate_with!("two", &to_env![("VAR3", "irrelevant change")]);
+                return_matches!(value_eq_one, Ok(false));
+                return_matches!(value_ne_one, Ok(true));
+            };
+        };
+    }
 
-        // Value
-        {
-            let filter = Value(Equals(to_string!("one")));
-            let compare_value_eq_one = unwrap_match!(
-                ContextComparer::from(&filter),
-                ContextComparer::Value(compare) => compare,
-            );
-
-            assert!(compare_value_eq_one("one"));
-            assert!(compare_value_eq_one("one"));
-            assert!(!compare_value_eq_one("two"));
-        }
-
-        // Env
-        {
-            let filter = Env(vec![(to_string!("VAR1"), Equals(to_string!("one")))]);
-            let compare_var1_eq_one = unwrap_match!(
-                ContextComparer::from(&filter),
-                ContextComparer::Env(compare) => compare,
-            );
-
-            assert!(matches!(
-                compare_var1_eq_one(&to_env![("VAR1", "one")]),
-                Ok(true)
-            ));
-            assert!(matches!(
-                compare_var1_eq_one(&to_env![("VAR1", "one")]),
-                Ok(true)
-            ));
-            assert!(matches!(
-                compare_var1_eq_one(&to_env![("VAR1", "two")]),
-                Ok(false)
-            ));
-            assert!(matches!(
-                compare_var1_eq_one(&to_env![("VAR2", "one")]),
-                Err("VAR1")
-            ));
-            assert!(matches!(compare_var1_eq_one(&HashMap::new()), Err("VAR1")));
-
-            let filters = [
-                Env(vec![
+    #[test]
+    #[wasm_bindgen_test]
+    fn env_filter_test() {
+        test_filter_predicate! {
+            filters!{
+                let var1_eq_one = Filter::Context(Env(vec![(to_string!("VAR1"), Equals(to_string!("one")))]));
+                let var1_ne_one = Filter::Not(Box::new(var1_eq_one.clone()));
+                let var1_var3 = Filter::Context(Env(vec![
                     (to_string!("VAR1"), Equals(to_string!("one"))),
                     (to_string!("VAR3"), Equals(to_string!("three"))),
-                ]),
-                Env(vec![
+                ]));
+                let var3_var1 = Filter::Context(Env(vec![
                     (to_string!("VAR3"), Equals(to_string!("three"))),
                     (to_string!("VAR1"), Equals(to_string!("one"))),
-                ]),
-            ];
-            for filter in filters {
-                let compare_multipul = unwrap_match!(
-                    ContextComparer::from(&filter),
-                    ContextComparer::Env(compare) => compare,
-                );
-                assert!(matches!(
-                    compare_multipul(&to_env![
-                        ("VAR1", "one"),
-                        ("VAR2", "two"),
-                        ("VAR3", "three")
-                    ]),
-                    Ok(true)
-                ));
-                assert!(matches!(
-                    compare_multipul(&to_env![
-                        ("VAR3", "three"),
-                        ("VAR2", "two"),
-                        ("VAR1", "one")
-                    ]),
-                    Ok(true)
-                ));
-                assert!(matches!(
-                    compare_multipul(&to_env![
-                        ("VAR1", "one"),
-                        ("VAR2", "irrelevant change"),
-                        ("VAR3", "three")
-                    ]),
-                    Ok(true)
-                ));
-                assert!(matches!(
-                    compare_multipul(&to_env![("VAR1", "one"), ("VAR3", "three")]),
-                    Ok(true)
-                ));
-                assert!(matches!(
-                    compare_multipul(&to_env![("VAR3", "three")]),
-                    Err("VAR1")
-                ));
-                assert!(matches!(
-                    compare_multipul(&to_env![("VAR1", "one")]),
-                    Err("VAR3")
-                ));
-                assert!(matches!(
-                    compare_multipul(&HashMap::new()),
-                    Err("VAR1") | Err("VAR3") // not testing for order
-                ));
-                assert!(matches!(
-                    compare_multipul(&to_env![
-                        ("VAR1", "two"),
-                        ("VAR2", "two"),
-                        ("VAR3", "three")
-                    ]),
-                    Ok(false)
-                ));
-                assert!(matches!(
-                    compare_multipul(&to_env![
-                        ("VAR3", "three"),
-                        ("VAR2", "two"),
-                        ("VAR1", "two")
-                    ]),
-                    Ok(false)
-                ));
-                assert!(matches!(
-                    compare_multipul(&to_env![("VAR1", "one"), ("VAR2", "two"), ("VAR3", "two")]),
-                    Ok(false)
-                ));
-                assert!(matches!(
-                    compare_multipul(&to_env![("VAR3", "two"), ("VAR2", "two"), ("VAR1", "one")]),
-                    Ok(false)
-                ));
-                assert!(matches!(
-                    compare_multipul(&to_env![("VAR1", "two"), ("VAR2", "two"), ("VAR3", "two")]),
-                    Ok(false)
-                ));
-                assert!(matches!(
-                    compare_multipul(&to_env![("VAR3", "two"), ("VAR2", "two"), ("VAR1", "two")]),
-                    Ok(false)
-                ));
-            }
+                ]));
+            };
+            for_each_filter!{
+                predicate_with!("one", &to_env![("VAR1", "one"), ("VAR2", "two")]);
+                return_matches!(var1_eq_one, Ok(true));
+                return_matches!(var1_ne_one, Ok(false));
+                return_matches!(var1_var3, Err("VAR3"));
+                return_matches!(var3_var1, Err("VAR3"));
+            };
+            for_each_filter!{
+                predicate_with!("irrelevant change", &to_env![("VAR1", "one"), ("VAR2", "two")]);
+                return_matches!(var1_eq_one, Ok(true));
+                return_matches!(var1_ne_one, Ok(false));
+                return_matches!(var1_var3, Err("VAR3"));
+                return_matches!(var3_var1, Err("VAR3"));
+            };
+            for_each_filter!{
+                predicate_with!("one", &to_env![("VAR1", "one"), ("VAR3", "irrelevant change")]);
+                return_matches!(var1_eq_one, Ok(true));
+                return_matches!(var1_ne_one, Ok(false));
+                return_matches!(var1_var3, Ok(false));
+                return_matches!(var3_var1, Ok(false));
+            };
+            for_each_filter!{
+                predicate_with!("one", &to_env![("VAR1", "two"), ("VAR2", "two")]);
+                return_matches!(var1_eq_one, Ok(false));
+                return_matches!(var1_ne_one, Ok(true));
+                return_matches!(var1_var3, Ok(false));
+                return_matches!(var3_var1, Err("VAR3"));
+            };
+            for_each_filter!{
+                predicate_with!("one", &to_env![("VAR2", "two")]);
+                return_matches!(var1_eq_one, Err("VAR1"));
+                return_matches!(var1_ne_one, Err("VAR1"));
+                return_matches!(var1_var3, Err("VAR1"));
+                return_matches!(var3_var1, Err("VAR3"));
+            };
+            for_each_filter!{
+                predicate_with!("one", &to_env![("VAR1", "one"), ("VAR2", "two"), ("VAR3", "three")]);
+                return_matches!(var1_eq_one, Ok(true));
+                return_matches!(var1_ne_one, Ok(false));
+                return_matches!(var1_var3, Ok(true));
+                return_matches!(var3_var1, Ok(true));
+            };
+            for_each_filter!{
+                predicate_with!("one", &to_env![("VAR3", "three"), ("VAR2", "two"), ("VAR1", "one")]);
+                return_matches!(var1_eq_one, Ok(true));
+                return_matches!(var1_ne_one, Ok(false));
+                return_matches!(var1_var3, Ok(true));
+                return_matches!(var3_var1, Ok(true));
+            };
+            for_each_filter!{
+                predicate_with!("one", &to_env![("VAR1", "one"), ("VAR2", "irrelevant change"), ("VAR3", "three")]);
+                return_matches!(var1_eq_one, Ok(true));
+                return_matches!(var1_ne_one, Ok(false));
+                return_matches!(var1_var3, Ok(true));
+                return_matches!(var3_var1, Ok(true));
+            };
+            for_each_filter!{
+                predicate_with!("one", &to_env![("VAR1", "one"), ("VAR3", "three")]);
+                return_matches!(var1_eq_one, Ok(true));
+                return_matches!(var1_ne_one, Ok(false));
+                return_matches!(var1_var3, Ok(true));
+                return_matches!(var3_var1, Ok(true));
+            };
+            for_each_filter!{
+                predicate_with!("one", &to_env![("VAR3", "three")]);
+                return_matches!(var1_eq_one, Err("VAR1"));
+                return_matches!(var1_ne_one, Err("VAR1"));
+                return_matches!(var1_var3, Err("VAR1"));
+                return_matches!(var3_var1, Err("VAR1"));
+            };
+            for_each_filter!{
+                predicate_with!("one", &to_env![("VAR1", "one")]);
+                return_matches!(var1_eq_one, Ok(true));
+                return_matches!(var1_ne_one, Ok(false));
+                return_matches!(var1_var3, Err("VAR3"));
+                return_matches!(var3_var1, Err("VAR3"));
+            };
+            for_each_filter!{
+                predicate_with!("one", &HashMap::new());
+                return_matches!(var1_eq_one, Err("VAR1"));
+                return_matches!(var1_ne_one, Err("VAR1"));
+                return_matches!(var1_var3, Err("VAR1"));
+                return_matches!(var3_var1, Err("VAR3"));
+            };
+            for_each_filter!{
+                predicate_with!("one", &to_env![("VAR1", "two"), ("VAR2", "two"), ("VAR3", "three")]);
+                return_matches!(var1_eq_one, Ok(false));
+                return_matches!(var1_ne_one, Ok(true));
+                return_matches!(var1_var3, Ok(false));
+                return_matches!(var3_var1, Ok(false));
+            };
+            for_each_filter!{
+                predicate_with!("one", &to_env![("VAR3", "three"), ("VAR2", "two"), ("VAR1", "two")]);
+                return_matches!(var1_eq_one, Ok(false));
+                return_matches!(var1_ne_one, Ok(true));
+                return_matches!(var1_var3, Ok(false));
+                return_matches!(var3_var1, Ok(false));
+            };
+            for_each_filter!{
+                predicate_with!("one", &to_env![("VAR1", "one"), ("VAR2", "two"), ("VAR3", "two")]);
+                return_matches!(var1_eq_one, Ok(true));
+                return_matches!(var1_ne_one, Ok(false));
+                return_matches!(var1_var3, Ok(false));
+                return_matches!(var3_var1, Ok(false));
+            };
+            for_each_filter!{
+                predicate_with!("one", &to_env![("VAR3", "two"), ("VAR2", "two"), ("VAR1", "one")]);
+                return_matches!(var1_eq_one, Ok(true));
+                return_matches!(var1_ne_one, Ok(false));
+                return_matches!(var1_var3, Ok(false));
+                return_matches!(var3_var1, Ok(false));
+            };
+            for_each_filter!{
+                predicate_with!("one", &to_env![("VAR1", "two"), ("VAR2", "two"), ("VAR3", "two")]);
+                return_matches!(var1_eq_one, Ok(false));
+                return_matches!(var1_ne_one, Ok(true));
+                return_matches!(var1_var3, Ok(false));
+                return_matches!(var3_var1, Ok(false));
+            };
+            for_each_filter!{
+                predicate_with!("one", &to_env![("VAR3", "two"), ("VAR2", "two"), ("VAR1", "two")]);
+                return_matches!(var1_eq_one, Ok(false));
+                return_matches!(var1_ne_one, Ok(true));
+                return_matches!(var1_var3, Ok(false));
+                return_matches!(var3_var1, Ok(false));
+            };
         }
     }
 
     #[test]
     #[wasm_bindgen_test]
-    fn filter_test() {
-        // Value
-        {
-            let value_eq_one = Filter::Context(Value(Equals(to_string!("one"))));
-            let value_ne_one = Filter::Not(Box::new(value_eq_one.clone()));
-            for filter in [&value_eq_one, &value_ne_one] {
-                let compare_value = CompareContext::from(filter);
-                assert!(
-                    match compare_value("one", &to_env![("VAR1", "one"), ("VAR2", "two")]) {
-                        Ok(true) if filter == &value_eq_one => true,
-                        Ok(false) if filter == &value_ne_one => true,
-                        matched => panic!("got {matched:?} for filter {filter}"),
-                    }
-                );
-                assert!(
-                    match compare_value("one", &to_env![("VAR3", "irrelevant change")]) {
-                        Ok(true) if filter == &value_eq_one => true,
-                        Ok(false) if filter == &value_ne_one => true,
-                        matched => panic!("got {matched:?} for filter {filter}"),
-                    }
-                );
-                assert!(
-                    match compare_value("two", &to_env![("VAR1", "one"), ("VAR2", "two")]) {
-                        Ok(false) if filter == &value_eq_one => true,
-                        Ok(true) if filter == &value_ne_one => true,
-                        matched => panic!("got {matched:?} for filter {filter}"),
-                    }
-                );
-            }
+    fn all_filter_test() {
+        test_filter_predicate! {
+            filters!{
+                let var1_and_value_eq_one = Filter::All(vec![
+                    Context(Env(vec![(to_string!("VAR1"), Equals(to_string!("one")))])),
+                    Context(Value(Equals(to_string!("one")))),
+                ]);
+                let var1_and_value_ne_one = Filter::Not(Box::new(var1_and_value_eq_one.clone()));
+                let var1_and_value_eq_one_reversed = Filter::All(vec![
+                    Context(Value(Equals(to_string!("one")))),
+                    Context(Env(vec![(to_string!("VAR1"), Equals(to_string!("one")))])),
+                ]);
+                let var1_and_value_ne_one_reversed = Filter::Not(Box::new(var1_and_value_eq_one_reversed.clone()));
+            };
+            for_each_filter!{
+                predicate_with!("one", &to_env![("VAR1", "one"), ("VAR2", "two")]);
+                return_matches!(var1_and_value_eq_one, Ok(true));
+                return_matches!(var1_and_value_ne_one, Ok(false));
+                return_matches!(var1_and_value_eq_one_reversed, Ok(true));
+                return_matches!(var1_and_value_ne_one_reversed, Ok(false));
+            };
+            for_each_filter!{
+                predicate_with!("one", &to_env![("VAR1", "one"), ("VAR3", "irrelevant change")]);
+                return_matches!(var1_and_value_eq_one, Ok(true));
+                return_matches!(var1_and_value_ne_one, Ok(false));
+                return_matches!(var1_and_value_eq_one_reversed, Ok(true));
+                return_matches!(var1_and_value_ne_one_reversed, Ok(false));
+            };
+            for_each_filter!{
+                predicate_with!("two", &to_env![("VAR1", "one"), ("VAR2", "two")]);
+                return_matches!(var1_and_value_eq_one, Ok(false));
+                return_matches!(var1_and_value_ne_one, Ok(true));
+                return_matches!(var1_and_value_eq_one_reversed, Ok(false));
+                return_matches!(var1_and_value_ne_one_reversed, Ok(true));
+            };
+            for_each_filter!{
+                predicate_with!("one", &to_env![("VAR1", "two"), ("VAR2", "two")]);
+                return_matches!(var1_and_value_eq_one, Ok(false));
+                return_matches!(var1_and_value_ne_one, Ok(true));
+                return_matches!(var1_and_value_eq_one_reversed, Ok(false));
+                return_matches!(var1_and_value_ne_one_reversed, Ok(true));
+            };
+            for_each_filter!{
+                predicate_with!("two", &to_env![("VAR1", "two"), ("VAR2", "two")]);
+                return_matches!(var1_and_value_eq_one, Ok(false));
+                return_matches!(var1_and_value_ne_one, Ok(true));
+                return_matches!(var1_and_value_eq_one_reversed, Ok(false));
+                return_matches!(var1_and_value_ne_one_reversed, Ok(true));
+            };
+            for_each_filter!{
+                predicate_with!("one", &to_env![("VAR2", "two")]);
+                return_matches!(var1_and_value_eq_one, Err("VAR1"));
+                return_matches!(var1_and_value_ne_one, Err("VAR1"));
+                return_matches!(var1_and_value_eq_one_reversed, Err("VAR1"));
+                return_matches!(var1_and_value_ne_one_reversed, Err("VAR1"));
+            };
+        };
+    }
+
+    #[test]
+    #[wasm_bindgen_test]
+    fn any_filter_test() {
+        test_filter_predicate! {
+            filters!{
+                let var1_or_value_eq_one = Filter::Any(vec![
+                    Context(Value(Equals(to_string!("one")))),
+                    Context(Env(vec![(to_string!("VAR1"), Equals(to_string!("one")))])),
+                ]);
+                let var1_or_value_ne_one = Filter::Not(Box::new(var1_or_value_eq_one.clone()));
+                let var1_or_value_eq_one_reversed = Filter::Any(vec![
+                    Context(Env(vec![(to_string!("VAR1"), Equals(to_string!("one")))])),
+                    Context(Value(Equals(to_string!("one")))),
+                ]);
+                let var1_or_value_ne_one_reversed =
+                    Filter::Not(Box::new(var1_or_value_eq_one_reversed.clone()));
+            };
+            for_each_filter!{
+                predicate_with!("one", &to_env![("VAR1", "one"), ("VAR2", "two")]);
+                return_matches!(var1_or_value_eq_one, Ok(true));
+                return_matches!(var1_or_value_ne_one, Ok(false));
+                return_matches!(var1_or_value_eq_one_reversed, Ok(true));
+                return_matches!(var1_or_value_ne_one_reversed, Ok(false));
+            };
+            for_each_filter!{
+                predicate_with!("two", &to_env![("VAR1", "one"), ("VAR2", "two")]);
+                return_matches!(var1_or_value_eq_one, Ok(true));
+                return_matches!(var1_or_value_ne_one, Ok(false));
+                return_matches!(var1_or_value_eq_one_reversed, Ok(true));
+                return_matches!(var1_or_value_ne_one_reversed, Ok(false));
+            };
+            for_each_filter!{
+                predicate_with!("one", &to_env![("VAR1", "two"), ("VAR2", "two")]);
+                return_matches!(var1_or_value_eq_one, Ok(true));
+                return_matches!(var1_or_value_ne_one, Ok(false));
+                return_matches!(var1_or_value_eq_one_reversed, Ok(true));
+                return_matches!(var1_or_value_ne_one_reversed, Ok(false));
+            };
+            for_each_filter!{
+                predicate_with!("two", &to_env![("VAR1", "two"), ("VAR2", "two")]);
+                return_matches!(var1_or_value_eq_one, Ok(false));
+                return_matches!(var1_or_value_ne_one, Ok(true));
+                return_matches!(var1_or_value_eq_one_reversed, Ok(false));
+                return_matches!(var1_or_value_ne_one_reversed, Ok(true));
+            };
+            for_each_filter!{
+                predicate_with!("one", &to_env![("VAR2", "two")]);
+                return_matches!(var1_or_value_eq_one, Ok(true));
+                return_matches!(var1_or_value_ne_one, Ok(false));
+                return_matches!(var1_or_value_eq_one_reversed, Err("VAR1"));
+                return_matches!(var1_or_value_ne_one_reversed, Err("VAR1"));
+            };
+            for_each_filter!{
+                predicate_with!("two", &to_env![("VAR2", "two")]);
+                return_matches!(var1_or_value_eq_one, Err("VAR1"));
+                return_matches!(var1_or_value_ne_one, Err("VAR1"));
+                return_matches!(var1_or_value_eq_one_reversed, Err("VAR1"));
+                return_matches!(var1_or_value_ne_one_reversed, Err("VAR1"));
+            };
         }
+    }
 
-        // Env
-        {
-            let var1_eq_one =
-                Filter::Context(Env(vec![(to_string!("VAR1"), Equals(to_string!("one")))]));
-            let var1_ne_one = Filter::Not(Box::new(var1_eq_one.clone()));
-            for filter in [&var1_eq_one, &var1_ne_one] {
-                let compare_env = CompareContext::from(filter);
-                assert!(
-                    match compare_env("one", &to_env![("VAR1", "one"), ("VAR2", "two")]) {
-                        Ok(true) if filter == &var1_eq_one => true,
-                        Ok(false) if filter == &var1_ne_one => true,
-                        matched => panic!("got {matched:?} for filter {filter}"),
-                    }
-                );
-                assert!(match compare_env(
-                    "irrelevant change",
-                    &to_env![("VAR1", "one"), ("VAR2", "two")]
-                ) {
-                    Ok(true) if filter == &var1_eq_one => true,
-                    Ok(false) if filter == &var1_ne_one => true,
-                    matched => panic!("got {matched:?} for filter {filter}"),
-                });
-                assert!(match compare_env(
-                    "one",
-                    &to_env![("VAR1", "one"), ("VAR3", "irrelevant change")]
-                ) {
-                    Ok(true) if filter == &var1_eq_one => true,
-                    Ok(false) if filter == &var1_ne_one => true,
-                    matched => panic!("got {matched:?} for filter {filter}"),
-                });
-                assert!(
-                    match compare_env("one", &to_env![("VAR1", "two"), ("VAR2", "two")]) {
-                        Ok(false) if filter == &var1_eq_one => true,
-                        Ok(true) if filter == &var1_ne_one => true,
-                        matched => panic!("got {matched:?} for filter {filter}"),
-                    }
-                );
-                assert!(match compare_env("one", &to_env![("VAR2", "two")]) {
-                    Err("VAR1") if filter == &var1_eq_one => true,
-                    Err("VAR1") if filter == &var1_ne_one => true,
-                    matched => panic!("got {matched:?} for filter {filter}"),
-                });
-            }
+    #[test]
+    #[wasm_bindgen_test]
+    fn not_filter_test() {
+        test_filter_predicate! {
+            filters!{
+                let not_not = Filter::Not(Box::new(Not(Box::new(Context(Value(Equals(to_string!(
+                    "one"
+                ))))))));
+            };
+            for_each_filter!{
+                predicate_with!("one", &to_env![]);
+                return_matches!(not_not, Ok(true));
+            };
         }
-
-        // All
-        {
-            let var1_and_value_eq_one = Filter::All(vec![
-                Context(Env(vec![(to_string!("VAR1"), Equals(to_string!("one")))])),
-                Context(Value(Equals(to_string!("one")))),
-            ]);
-            let var1_and_value_ne_one = Filter::Not(Box::new(var1_and_value_eq_one.clone()));
-            let var1_and_value_eq_one_reversed = Filter::All(vec![
-                Context(Value(Equals(to_string!("one")))),
-                Context(Env(vec![(to_string!("VAR1"), Equals(to_string!("one")))])),
-            ]);
-            let var1_and_value_ne_one_reversed =
-                Filter::Not(Box::new(var1_and_value_eq_one_reversed.clone()));
-            for filter in [
-                &var1_and_value_eq_one,
-                &var1_and_value_ne_one,
-                &var1_and_value_eq_one_reversed,
-                &var1_and_value_ne_one_reversed,
-            ] {
-                let compare_context = CompareContext::from(filter);
-                assert!(
-                    match compare_context("one", &to_env![("VAR1", "one"), ("VAR2", "two")]) {
-                        Ok(true) if filter == &var1_and_value_eq_one => true,
-                        Ok(false) if filter == &var1_and_value_ne_one => true,
-                        Ok(true) if filter == &var1_and_value_eq_one_reversed => true,
-                        Ok(false) if filter == &var1_and_value_ne_one_reversed => true,
-                        matched => panic!("got {matched:?} for filter {filter}"),
-                    }
-                );
-                assert!(match compare_context(
-                    "one",
-                    &to_env![("VAR1", "one"), ("VAR3", "irrelevant change")]
-                ) {
-                    Ok(true) if filter == &var1_and_value_eq_one => true,
-                    Ok(false) if filter == &var1_and_value_ne_one => true,
-                    Ok(true) if filter == &var1_and_value_eq_one_reversed => true,
-                    Ok(false) if filter == &var1_and_value_ne_one_reversed => true,
-                    matched => panic!("got {matched:?} for filter {filter}"),
-                });
-                assert!(
-                    match compare_context("two", &to_env![("VAR1", "one"), ("VAR2", "two")]) {
-                        Ok(false) if filter == &var1_and_value_eq_one => true,
-                        Ok(true) if filter == &var1_and_value_ne_one => true,
-                        Ok(false) if filter == &var1_and_value_eq_one_reversed => true,
-                        Ok(true) if filter == &var1_and_value_ne_one_reversed => true,
-                        matched => panic!("got {matched:?} for filter {filter}"),
-                    }
-                );
-                assert!(
-                    match compare_context("one", &to_env![("VAR1", "two"), ("VAR2", "two")]) {
-                        Ok(false) if filter == &var1_and_value_eq_one => true,
-                        Ok(true) if filter == &var1_and_value_ne_one => true,
-                        Ok(false) if filter == &var1_and_value_eq_one_reversed => true,
-                        Ok(true) if filter == &var1_and_value_ne_one_reversed => true,
-                        matched => panic!("got {matched:?} for filter {filter}"),
-                    }
-                );
-                assert!(
-                    match compare_context("two", &to_env![("VAR1", "two"), ("VAR2", "two")]) {
-                        Ok(false) if filter == &var1_and_value_eq_one => true,
-                        Ok(true) if filter == &var1_and_value_ne_one => true,
-                        Ok(false) if filter == &var1_and_value_eq_one_reversed => true,
-                        Ok(true) if filter == &var1_and_value_ne_one_reversed => true,
-                        matched => panic!("got {matched:?} for filter {filter}"),
-                    }
-                );
-                assert!(match compare_context("one", &to_env![("VAR2", "two")]) {
-                    Err("VAR1") if filter == &var1_and_value_eq_one => true,
-                    Err("VAR1") if filter == &var1_and_value_ne_one => true,
-                    Err("VAR1") if filter == &var1_and_value_eq_one_reversed => true,
-                    Err("VAR1") if filter == &var1_and_value_ne_one_reversed => true,
-                    matched => panic!("got {matched:?} for filter {filter}"),
-                });
-            }
-        }
-
-        // Any
-        {
-            let var1_or_value_eq_one = Filter::Any(vec![
-                Context(Value(Equals(to_string!("one")))),
-                Context(Env(vec![(to_string!("VAR1"), Equals(to_string!("one")))])),
-            ]);
-            let var1_or_value_ne_one = Filter::Not(Box::new(var1_or_value_eq_one.clone()));
-            let var1_or_value_eq_one_reversed = Filter::Any(vec![
-                Context(Env(vec![(to_string!("VAR1"), Equals(to_string!("one")))])),
-                Context(Value(Equals(to_string!("one")))),
-            ]);
-            let var1_or_value_ne_one_reversed =
-                Filter::Not(Box::new(var1_or_value_eq_one_reversed.clone()));
-            for filter in [
-                &var1_or_value_eq_one,
-                &var1_or_value_ne_one,
-                &var1_or_value_eq_one_reversed,
-                &var1_or_value_ne_one_reversed,
-            ] {
-                let compare_context = CompareContext::from(filter);
-
-                assert!(
-                    match compare_context("one", &to_env![("VAR1", "one"), ("VAR2", "two")]) {
-                        Ok(true) if filter == &var1_or_value_eq_one => true,
-                        Ok(false) if filter == &var1_or_value_ne_one => true,
-                        Ok(true) if filter == &var1_or_value_eq_one_reversed => true,
-                        Ok(false) if filter == &var1_or_value_ne_one_reversed => true,
-                        matched => panic!("got {matched:?} for filter {filter}"),
-                    }
-                );
-                assert!(
-                    match compare_context("two", &to_env![("VAR1", "one"), ("VAR2", "two")]) {
-                        Ok(true) if filter == &var1_or_value_eq_one => true,
-                        Ok(false) if filter == &var1_or_value_ne_one => true,
-                        Ok(true) if filter == &var1_or_value_eq_one_reversed => true,
-                        Ok(false) if filter == &var1_or_value_ne_one_reversed => true,
-                        matched => panic!("got {matched:?} for filter {filter}"),
-                    }
-                );
-                assert!(
-                    match compare_context("one", &to_env![("VAR1", "two"), ("VAR2", "two")]) {
-                        Ok(true) if filter == &var1_or_value_eq_one => true,
-                        Ok(false) if filter == &var1_or_value_ne_one => true,
-                        Ok(true) if filter == &var1_or_value_eq_one_reversed => true,
-                        Ok(false) if filter == &var1_or_value_ne_one_reversed => true,
-                        matched => panic!("got {matched:?} for filter {filter}"),
-                    }
-                );
-                assert!(
-                    match compare_context("two", &to_env![("VAR1", "two"), ("VAR2", "two")]) {
-                        Ok(false) if filter == &var1_or_value_eq_one => true,
-                        Ok(true) if filter == &var1_or_value_ne_one => true,
-                        Ok(false) if filter == &var1_or_value_eq_one_reversed => true,
-                        Ok(true) if filter == &var1_or_value_ne_one_reversed => true,
-                        matched => panic!("got {matched:?} for filter {filter}"),
-                    }
-                );
-                match compare_context("one", &to_env![("VAR2", "two")]) {
-                    Ok(true) if filter == &var1_or_value_eq_one => true,
-                    Ok(false) if filter == &var1_or_value_ne_one => true,
-                    Err("VAR1") if filter == &var1_or_value_eq_one_reversed => true,
-                    Err("VAR1") if filter == &var1_or_value_ne_one_reversed => true,
-                    matched => panic!("got {matched:?} for filter {filter}"),
-                };
-                match compare_context("two", &to_env![("VAR2", "two")]) {
-                    Err("VAR1") if filter == &var1_or_value_eq_one => true,
-                    Err("VAR1") if filter == &var1_or_value_ne_one => true,
-                    Err("VAR1") if filter == &var1_or_value_eq_one_reversed => true,
-                    Err("VAR1") if filter == &var1_or_value_ne_one_reversed => true,
-                    matched => panic!("got {matched:?} for filter {filter}"),
-                };
-            }
-        }
-
-        assert!(matches!(
-            CompareContext::from(&Filter::Not(Box::new(Not(Box::new(Context(Value(
-                Equals(to_string!("one")),
-            )))))))("one", &HashMap::new()),
-            Ok(true)
-        ));
     }
 }
