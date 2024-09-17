@@ -3,12 +3,16 @@ mod retry_fold;
 use {
     super::*,
     core::{
+        cell::{RefCell, RefMut},
         fmt::Display,
         ops::{ControlFlow, Not},
     },
     log::*,
     retry_fold::retry_fold,
-    std::collections::HashMap,
+    std::{
+        collections::{hash_map, HashMap},
+        rc::Rc,
+    },
 };
 
 #[derive(Clone, Eq, PartialEq, Debug, Serialize, Deserialize)]
@@ -25,26 +29,28 @@ impl Display for Filter {
         write!(f, "{}", serde_json::to_string_pretty(self).unwrap())
     }
 }
-pub type CompareContext<'comparer> = Box<dyn FnMut() -> Result<bool, &'comparer str> + 'comparer>;
+pub type CompareContext<'comparer> =
+    Box<dyn FnMut() -> Result<bool, hash_map::VacantEntry<'comparer, String, String>> + 'comparer>;
 impl Filter {
     pub fn to_predicate<'comparer>(
         &'comparer self,
         value: &'comparer str,
-        env: &'comparer HashMap<String, String>,
+        env: &'comparer mut HashMap<String, String>,
     ) -> CompareContext<'comparer> {
-        type Result<'comparer> = core::result::Result<bool, &'comparer str>;
+        type Error<'comparer> = hash_map::VacantEntry<'comparer, String, String>;
+        type Result<'comparer> = core::result::Result<bool, Error<'comparer>>;
 
         #[inline]
         fn retry_fold_filters<'c>(
             filters: impl IntoIterator<Item = &'c Filter> + 'c,
-            init: Result<'c>,
+            init: bool,
             fold: impl FnMut(
-                    &mut Result,
+                    &mut bool,
                     CompareContext<'c>,
                 ) -> ControlFlow<(Result<'c>, CompareContext<'c>)>
                 + 'c,
             value: &'c str,
-            env: &'c HashMap<String, String>,
+            env: &'c mut HashMap<String, String>,
         ) -> CompareContext<'c> {
             let mut filters = itertools::put_back(
                 filters
@@ -53,39 +59,40 @@ impl Filter {
             );
             let mut retry_fold = retry_fold(init, fold);
             Box::new(move || match retry_fold(&mut filters) {
-                ControlFlow::Continue(res) | ControlFlow::Break(res) => res,
+                ControlFlow::Continue(res) | ControlFlow::Break(Ok(res)) => Ok(res),
+                ControlFlow::Break(Err(err)) => Err(err),
             })
         }
 
         #[inline]
         fn try_all<'c>(
-            _initial: &mut Result,
+            _initial: &mut bool,
             mut comparer: CompareContext<'c>,
         ) -> ControlFlow<(Result<'c>, CompareContext<'c>)> {
-            const CONTINUE_VALUE: Result = Ok(true);
+            const CONTINUE_VALUE: bool = true;
             debug_assert_eq!(*_initial, CONTINUE_VALUE);
             match comparer() {
-                CONTINUE_VALUE => ControlFlow::Continue(()),
+                Ok(CONTINUE_VALUE) => ControlFlow::Continue(()),
                 res @ Ok(false) | res @ Err(_) => ControlFlow::Break((res, comparer)),
             }
         }
 
         #[inline]
         fn try_any<'c>(
-            _initial: &mut Result,
+            _initial: &mut bool,
             mut comparer: CompareContext<'c>,
         ) -> ControlFlow<(Result<'c>, CompareContext<'c>)> {
-            const CONTINUE_VALUE: Result = Ok(false);
+            const CONTINUE_VALUE: bool = false;
             debug_assert_eq!(*_initial, CONTINUE_VALUE);
             match comparer() {
-                CONTINUE_VALUE => ControlFlow::Continue(()),
+                Ok(CONTINUE_VALUE) => ControlFlow::Continue(()),
                 res @ Ok(true) | res @ Err(_) => ControlFlow::Break((res, comparer)),
             }
         }
 
         match self {
-            Filter::All(filters) => retry_fold_filters(filters, Ok(true), try_all, value, env),
-            Filter::Any(filters) => retry_fold_filters(filters, Ok(false), try_any, value, env),
+            Filter::All(filters) => retry_fold_filters(filters, true, try_all, value, env),
+            Filter::Any(filters) => retry_fold_filters(filters, false, try_any, value, env),
             parrent_filter @ Filter::Not(filter) => {
                 let filter = filter.as_ref();
                 if let Filter::Not(_) = filter {
@@ -99,18 +106,25 @@ impl Filter {
                 Box::new(move || Ok(comparer(value)))
             }
             Filter::Context(FilterContext::Env(comparers)) => {
+                let env = Rc::new(env);
                 let mut comparers = itertools::put_back(comparers.iter().map(
                     move |(env_var, comparer): &(String, _)| -> CompareContext {
+                        let env = RefCell::new(env);
                         let comparer = CompareValue::from(comparer);
-                        Box::new(move || match env.get(env_var) {
-                            Some(value) => Ok(comparer(value)),
-                            None => Err(env_var.as_str()),
+                        Box::new(move || {
+                            match RefMut::map(env.borrow_mut(), |env| {
+                                &mut env.entry(env_var.to_string())
+                            }) {
+                                hash_map::Entry::Occupied(occupied) => Ok(comparer(occupied.get())),
+                                hash_map::Entry::Vacant(vacant) => Err(vacant),
+                            }
                         })
                     },
                 ));
-                let mut retry_fold = retry_fold(Ok(true), try_all);
+                let mut retry_fold = retry_fold(true, try_all);
                 Box::new(move || match retry_fold(&mut comparers) {
-                    ControlFlow::Continue(res) | ControlFlow::Break(res) => res,
+                    ControlFlow::Continue(res) | ControlFlow::Break(Ok(res)) => Ok(res),
+                    ControlFlow::Break(Err(err)) => Err(err),
                 })
             }
         }
